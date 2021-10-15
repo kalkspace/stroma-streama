@@ -179,8 +179,37 @@ func getTrack(
 	inBuf := make([]int16, frameSize)
 	encBuf := make([]byte, 1024)
 
+	devices, err := portaudio.Devices()
+	if err != nil {
+		panic(err)
+	}
+	var selectedDev *portaudio.DeviceInfo
+	if len(os.Args) > 1 {
+		for _, dev := range devices {
+			if dev.Name == os.Args[1] {
+				if dev.MaxInputChannels < channelCount {
+					log.WithField("channels", dev.MaxInputChannels).Fatal("Device not suitable for recording")
+				}
+				selectedDev = dev
+			}
+		}
+		if selectedDev == nil {
+			log.WithField("name", os.Args[0]).Fatal("dev not found")
+		}
+	} else {
+		dev, err := portaudio.DefaultInputDevice()
+		if err != nil {
+			log.WithError(err).Fatal("Failed to find default input device")
+		}
+		selectedDev = dev
+	}
+
 	// open mic source
-	stream, err := portaudio.OpenDefaultStream(channelCount, 0, sampleRate, len(inBuf), inBuf)
+	params := portaudio.LowLatencyParameters(selectedDev, nil)
+	params.Input.Channels = channelCount
+	params.SampleRate = sampleRate
+	params.FramesPerBuffer = len(inBuf)
+	stream, err := portaudio.OpenStream(params, inBuf)
 	if err != nil {
 		panic(err)
 	}
