@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/cors"
@@ -19,15 +23,33 @@ const oggPageDuration = time.Millisecond * 20
 
 func main() {
 	log := logrus.New()
-	track := getTrack()
+	log.SetLevel(logrus.DebugLevel)
 
-	handler := cors.AllowAll().Handler(handleClient(track, log))
-	http.Handle("/sdp", handler)
+	// cancellation
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGABRT)
+	defer cancel()
+
+	numClients := new(uint64)
+	clientConnected := make(chan struct{})
+	track := getTrack(ctx, log, numClients, clientConnected)
+
+	mux := http.NewServeMux()
+	mux.Handle("/sdp", handleClient(log, track, numClients, clientConnected))
+	server := http.Server{
+		Addr:    ":8080",
+		Handler: cors.AllowAll().Handler(mux),
+	}
+
+	go func() {
+		<-ctx.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+		defer cancel()
+		server.Shutdown(ctx)
+	}()
 
 	log.Info("starting server on port 8080")
-
-	err := http.ListenAndServe(":8080", nil)
-	if err != nil {
+	err := server.ListenAndServe()
+	if err != http.ErrServerClosed {
 		panic(err)
 	}
 }
@@ -36,7 +58,12 @@ var config = webrtc.Configuration{
 	ICEServers: []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
 }
 
-func handleClient(track *webrtc.TrackLocalStaticSample, log logrus.FieldLogger) http.HandlerFunc {
+func handleClient(
+	log logrus.FieldLogger,
+	track *webrtc.TrackLocalStaticSample,
+	numClients *uint64,
+	clientConnected chan<- struct{},
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.NotFound(w, r)
@@ -58,6 +85,19 @@ func handleClient(track *webrtc.TrackLocalStaticSample, log logrus.FieldLogger) 
 			return
 		}
 		log.Debug("created peer connection")
+
+		conn.OnConnectionStateChange(func(pcs webrtc.PeerConnectionState) {
+			switch pcs {
+			case webrtc.PeerConnectionStateConnected:
+				newCount := atomic.AddUint64(numClients, 1)
+				if newCount == 1 {
+					// signal client connected
+					clientConnected <- struct{}{}
+				}
+			case webrtc.PeerConnectionStateDisconnected:
+				atomic.AddUint64(numClients, ^uint64(0))
+			}
+		})
 
 		rtpSender, err := conn.AddTrack(track)
 		if err != nil {
@@ -116,7 +156,12 @@ func handleClient(track *webrtc.TrackLocalStaticSample, log logrus.FieldLogger) 
 	}
 }
 
-func getTrack() *webrtc.TrackLocalStaticSample {
+func getTrack(
+	ctx context.Context,
+	log logrus.FieldLogger,
+	numClients *uint64,
+	clientConnected <-chan struct{},
+) *webrtc.TrackLocalStaticSample {
 	// Create a audio track
 	audioTrack, audioTrackErr := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus}, "audio", "pion")
 	if audioTrackErr != nil {
@@ -124,6 +169,26 @@ func getTrack() *webrtc.TrackLocalStaticSample {
 	}
 
 	go func() {
+		if ctx.Err() != nil {
+			return
+		}
+
+		if atomic.LoadUint64(numClients) < 1 {
+			log.Info("Waiting for clients to connect")
+			select {
+			case <-ctx.Done():
+				return
+			case <-clientConnected:
+			}
+			log.Info("Client connected. Starting to stream")
+		}
+
+		// drain channel
+		select {
+		case <-clientConnected:
+		default:
+		}
+
 		// Open a IVF file and start reading using our IVFReader
 		file, oggErr := os.Open("test.ogg")
 		if oggErr != nil {
@@ -162,8 +227,8 @@ func getTrack() *webrtc.TrackLocalStaticSample {
 			lastGranule = pageHeader.GranulePosition
 			sampleDuration := time.Duration((sampleCount/48000)*1000) * time.Millisecond
 
-			if oggErr = audioTrack.WriteSample(media.Sample{Data: pageData, Duration: sampleDuration}); oggErr != nil {
-				panic(oggErr)
+			if err := audioTrack.WriteSample(media.Sample{Data: pageData, Duration: sampleDuration}); err != nil {
+				log.WithError(err).Warn("one peer failed")
 			}
 		}
 	}()
