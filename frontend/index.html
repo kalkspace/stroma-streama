@@ -1,0 +1,76 @@
+<html>
+  <head></head>
+  <body>
+    <h3>Audio:</h3>
+
+    <button id="startButton" style="display: block">Start Receiving</button>
+
+    <audio id="player" controls autoplay></audio>
+
+    <div id="logs"></div>
+
+    <script>
+      let pc = new RTCPeerConnection({
+        iceServers: [
+          {
+            urls: "stun:stun.l.google.com:19302",
+          },
+        ],
+      });
+
+      const logContainer = document.getElementById("logs");
+      let log = (msg) => {
+        logContainer.innerHTML += msg + "<br>";
+      };
+
+      const player = document.getElementById("player");
+      pc.ontrack = function (event) {
+        player.srcObject = event.streams[0];
+      };
+
+      pc.oniceconnectionstatechange = (e) => log(pc.iceConnectionState);
+      let sessionDescription = null;
+      pc.onicecandidate = (event) => {
+        if (event.candidate === null) {
+          sessionDescription = pc.localDescription;
+        }
+      };
+
+      // Offer to receive 1 audio
+      pc.addTransceiver("audio", {
+        direction: "sendrecv",
+      });
+
+      pc.createOffer()
+        .then((d) => pc.setLocalDescription(d))
+        .catch(log);
+
+      const startSession = async () => {
+        const response = await fetch("http://10.1.1.30:8080/sdp", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(sessionDescription),
+        });
+
+        if (!response.ok) {
+          log(`http request failed: ${response.statusCode}`);
+          return;
+        }
+
+        const remoteSession = await response.json();
+
+        try {
+          pc.setRemoteDescription(new RTCSessionDescription(remoteSession));
+        } catch (e) {
+          alert(e);
+        }
+      };
+
+      document
+        .getElementById("startButton")
+        .addEventListener("click", startSession);
+    </script>
+  </body>
+</html>
