@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,13 +12,12 @@ import (
 	"time"
 
 	"github.com/go-chi/cors"
+	"github.com/gordonklaus/portaudio"
 	"github.com/pion/webrtc/v3"
 	"github.com/pion/webrtc/v3/pkg/media"
-	"github.com/pion/webrtc/v3/pkg/media/oggreader"
 	"github.com/sirupsen/logrus"
+	"gopkg.in/hraban/opus.v2"
 )
-
-const oggPageDuration = time.Millisecond * 20
 
 func main() {
 	log := logrus.New()
@@ -156,12 +154,37 @@ func handleClient(
 	}
 }
 
+const (
+	sampleRate    = 48000
+	frameDuration = time.Duration(float32(time.Millisecond) * float32(2.5))
+	channelCount  = 1
+)
+
+var frameSize = uint64(frameDuration.Seconds() * sampleRate * channelCount)
+
 func getTrack(
 	ctx context.Context,
 	log logrus.FieldLogger,
 	numClients *uint64,
 	clientConnected <-chan struct{},
 ) *webrtc.TrackLocalStaticSample {
+	portaudio.Initialize()
+
+	opusEnc, err := opus.NewEncoder(sampleRate, channelCount, opus.AppVoIP)
+	if err != nil {
+		panic(err)
+	}
+
+	// buffers
+	inBuf := make([]int16, frameSize)
+	encBuf := make([]byte, 1024)
+
+	// open mic source
+	stream, err := portaudio.OpenDefaultStream(channelCount, 0, sampleRate, len(inBuf), inBuf)
+	if err != nil {
+		panic(err)
+	}
+
 	// Create a audio track
 	audioTrack, audioTrackErr := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus}, "audio", "pion")
 	if audioTrackErr != nil {
@@ -169,65 +192,60 @@ func getTrack(
 	}
 
 	go func() {
-		if ctx.Err() != nil {
-			return
-		}
+		defer portaudio.Terminate()
+		defer stream.Close()
 
-		if atomic.LoadUint64(numClients) < 1 {
-			log.Info("Waiting for clients to connect")
-			select {
-			case <-ctx.Done():
+		started := false
+		for {
+			if ctx.Err() != nil {
 				return
+			}
+
+			if atomic.LoadUint64(numClients) < 1 {
+				log.Info("Waiting for clients to connect")
+
+				if started {
+					if err := stream.Abort(); err != nil {
+						panic(err)
+					}
+					started = false
+				}
+
+				select {
+				case <-ctx.Done():
+					return
+				case <-clientConnected:
+				}
+
+				log.Info("Client connected. Starting to stream")
+			}
+
+			// drain channel
+			select {
 			case <-clientConnected:
-			}
-			log.Info("Client connected. Starting to stream")
-		}
-
-		// drain channel
-		select {
-		case <-clientConnected:
-		default:
-		}
-
-		// Open a IVF file and start reading using our IVFReader
-		file, oggErr := os.Open("test.ogg")
-		if oggErr != nil {
-			panic(oggErr)
-		}
-
-		// Open on oggfile in non-checksum mode.
-		ogg, _, oggErr := oggreader.NewWith(file)
-		if oggErr != nil {
-			panic(oggErr)
-		}
-
-		// Wait for connection established
-		//<-iceConnectedCtx.Done()
-
-		// Keep track of last granule, the difference is the amount of samples in the buffer
-		var lastGranule uint64
-
-		// It is important to use a time.Ticker instead of time.Sleep because
-		// * avoids accumulating skew, just calling time.Sleep didn't compensate for the time spent parsing the data
-		// * works around latency issues with Sleep (see https://github.com/golang/go/issues/44343)
-		ticker := time.NewTicker(oggPageDuration)
-		for ; true; <-ticker.C {
-			pageData, pageHeader, oggErr := ogg.ParseNextPage()
-			if oggErr == io.EOF {
-				fmt.Printf("All audio pages parsed and sent")
-				os.Exit(0)
+			default:
 			}
 
-			if oggErr != nil {
-				panic(oggErr)
+			if !started {
+				if err := stream.Start(); err != nil {
+					panic(err)
+				}
+				started = true
 			}
 
-			// The amount of samples is the difference between the last and current timestamp
-			sampleCount := float64(pageHeader.GranulePosition - lastGranule)
-			lastGranule = pageHeader.GranulePosition
-			sampleDuration := time.Duration((sampleCount/48000)*1000) * time.Millisecond
+			if err := stream.Read(); err != nil {
+				panic(err)
+			}
+			log.Debug("Read frame from input")
 
-			if err := audioTrack.WriteSample(media.Sample{Data: pageData, Duration: sampleDuration}); err != nil {
+			// encode to opus
+			size, err := opusEnc.Encode(inBuf, encBuf)
+			if err != nil {
+				panic(err)
+			}
+			log.WithField("size", size).Debug("Encoded to opus")
+
+			if err := audioTrack.WriteSample(media.Sample{Data: encBuf[:size], Duration: frameDuration}); err != nil {
 				log.WithError(err).Warn("one peer failed")
 			}
 		}
