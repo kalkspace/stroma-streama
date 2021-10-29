@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync/atomic"
+	"sync"
 	"syscall"
 	"time"
 
@@ -15,6 +15,7 @@ import (
 	"github.com/gordonklaus/portaudio"
 	"github.com/pion/webrtc/v3"
 	"github.com/pion/webrtc/v3/pkg/media"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/hraban/opus.v2"
 )
@@ -27,12 +28,13 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGABRT)
 	defer cancel()
 
-	numClients := new(uint64)
-	clientConnected := make(chan struct{})
-	track := getTrack(ctx, log, numClients, clientConnected)
+	addClient, err := setupAudio(ctx, log)
+	if err != nil {
+		log.WithError(err).Fatal("failed to setup audio recording")
+	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/sdp", handleClient(log, track, numClients, clientConnected))
+	mux.Handle("/sdp", handleClient(log, addClient))
 	server := http.Server{
 		Addr:    ":8080",
 		Handler: cors.AllowAll().Handler(mux),
@@ -46,7 +48,7 @@ func main() {
 	}()
 
 	log.Info("starting server on port 8080")
-	err := server.ListenAndServe()
+	err = server.ListenAndServe()
 	if err != http.ErrServerClosed {
 		panic(err)
 	}
@@ -58,9 +60,7 @@ var config = webrtc.Configuration{
 
 func handleClient(
 	log logrus.FieldLogger,
-	track *webrtc.TrackLocalStaticSample,
-	numClients *uint64,
-	clientConnected chan<- struct{},
+	clientConnected chan<- *conn,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -77,27 +77,33 @@ func handleClient(
 		}
 		log.Debug("decoded Session Description")
 
-		conn, err := webrtc.NewPeerConnection(config)
+		rtcConn, err := webrtc.NewPeerConnection(config)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		log.Debug("created peer connection")
 
-		conn.OnConnectionStateChange(func(pcs webrtc.PeerConnectionState) {
+		// Create a audio track
+		audioTrack, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus}, "audio", "pion")
+		if err != nil {
+			log.WithError(err).Error("failed to create track")
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		conn := newConn(audioTrack)
+
+		rtcConn.OnConnectionStateChange(func(pcs webrtc.PeerConnectionState) {
 			switch pcs {
 			case webrtc.PeerConnectionStateConnected:
-				newCount := atomic.AddUint64(numClients, 1)
-				if newCount == 1 {
-					// signal client connected
-					clientConnected <- struct{}{}
-				}
+				clientConnected <- conn
 			case webrtc.PeerConnectionStateDisconnected:
-				atomic.AddUint64(numClients, ^uint64(0))
+				close(conn.shutdown)
 			}
 		})
 
-		rtpSender, err := conn.AddTrack(track)
+		rtpSender, err := rtcConn.AddTrack(audioTrack)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -117,24 +123,24 @@ func handleClient(
 			}
 		}()
 
-		err = conn.SetRemoteDescription(offer)
+		err = rtcConn.SetRemoteDescription(offer)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		log.Debug("remote description set")
 
-		answer, err := conn.CreateAnswer(nil)
+		answer, err := rtcConn.CreateAnswer(nil)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		log.Debug("asnwer created")
 
-		gatherComplete := webrtc.GatheringCompletePromise(conn)
+		gatherComplete := webrtc.GatheringCompletePromise(rtcConn)
 
 		// Sets the LocalDescription, and starts our UDP listeners
-		err = conn.SetLocalDescription(answer)
+		err = rtcConn.SetLocalDescription(answer)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -162,17 +168,32 @@ const (
 
 var frameSize = uint64(frameDuration.Seconds() * sampleRate * channelCount)
 
-func getTrack(
+type conn struct {
+	track    *webrtc.TrackLocalStaticSample
+	shutdown chan struct{}
+}
+
+func newConn(track *webrtc.TrackLocalStaticSample) *conn {
+	return &conn{
+		track:    track,
+		shutdown: make(chan struct{}),
+	}
+}
+
+type clientStat struct {
+	sent    uint64
+	dropped uint64
+}
+
+func setupAudio(
 	ctx context.Context,
 	log logrus.FieldLogger,
-	numClients *uint64,
-	clientConnected <-chan struct{},
-) *webrtc.TrackLocalStaticSample {
+) (chan<- *conn, error) {
 	portaudio.Initialize()
 
 	opusEnc, err := opus.NewEncoder(sampleRate, channelCount, opus.AppVoIP)
 	if err != nil {
-		panic(err)
+		return nil, errors.Wrap(err, "failed setting up encoder")
 	}
 
 	// buffers
@@ -181,11 +202,12 @@ func getTrack(
 
 	devices, err := portaudio.Devices()
 	if err != nil {
-		panic(err)
+		return nil, errors.Wrap(err, "failed to get devices")
 	}
 	var selectedDev *portaudio.DeviceInfo
 	if len(os.Args) > 1 {
 		for _, dev := range devices {
+			log.WithField("name", dev.Name).Debug("dev found")
 			if dev.Name == os.Args[1] {
 				if dev.MaxInputChannels < channelCount {
 					log.WithField("channels", dev.MaxInputChannels).Fatal("Device not suitable for recording")
@@ -194,7 +216,7 @@ func getTrack(
 			}
 		}
 		if selectedDev == nil {
-			log.WithField("name", os.Args[0]).Fatal("dev not found")
+			log.WithField("name", os.Args[1]).Fatal("dev not found")
 		}
 	} else {
 		dev, err := portaudio.DefaultInputDevice()
@@ -211,49 +233,104 @@ func getTrack(
 	params.FramesPerBuffer = len(inBuf)
 	stream, err := portaudio.OpenStream(params, inBuf)
 	if err != nil {
-		panic(err)
+		return nil, errors.Wrap(err, "failed to open stream")
 	}
 
-	// Create a audio track
-	audioTrack, audioTrackErr := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus}, "audio", "pion")
-	if audioTrackErr != nil {
-		panic(audioTrackErr)
-	}
-
+	clientConnected := make(chan *conn)
 	go func() {
 		defer portaudio.Terminate()
 		defer stream.Close()
 
 		started := false
+		nextID := uint64(0)
+		clients := make(map[uint64]*conn)
+		stats := make(map[uint64]*clientStat)
+		clientLock := new(sync.Mutex)
+		frameChan := make(chan []byte, 10)
+
+		go func() {
+			ticker := time.NewTicker(frameDuration)
+			defer ticker.Stop()
+			lastStatsOutput := time.Now()
+			for {
+				<-ticker.C
+				data := <-frameChan
+
+				printStats := false
+				if time.Since(lastStatsOutput) > time.Second*5 {
+					lastStatsOutput = time.Now()
+					printStats = true
+				}
+
+				clientLock.Lock()
+				clientsCopy := make(map[uint64]*conn)
+				for id, conn := range clients {
+					clientsCopy[id] = conn
+				}
+				clientLock.Unlock()
+
+				for id, conn := range clientsCopy {
+					select {
+					case <-conn.shutdown:
+						delete(clients, id)
+						delete(stats, id)
+						continue
+					default:
+					}
+					err := conn.track.WriteSample(media.Sample{Data: data, Duration: frameDuration})
+					if err != nil {
+						log.WithError(err).Error("failed to send sample")
+						stats[id].dropped++
+					} else {
+						stats[id].sent++
+					}
+					if printStats {
+						log.WithFields(logrus.Fields{
+							"id":      id,
+							"sent":    stats[id].sent,
+							"dropped": stats[id].dropped,
+						}).Info("client stats")
+					}
+				}
+			}
+		}()
+
 		for {
 			if ctx.Err() != nil {
 				return
 			}
 
-			if atomic.LoadUint64(numClients) < 1 {
-				log.Info("Waiting for clients to connect")
-
+			clientLock.Lock()
+			if len(clients) == 0 {
 				if started {
-					if err := stream.Abort(); err != nil {
+					err := stream.Abort()
+					if err != nil {
 						panic(err)
 					}
 					started = false
 				}
 
+				log.Info("Waiting for clients to connect...")
 				select {
 				case <-ctx.Done():
 					return
-				case <-clientConnected:
+				case conn := <-clientConnected:
+					clients[nextID] = conn
+					stats[nextID] = &clientStat{}
+					nextID++
 				}
-
 				log.Info("Client connected. Starting to stream")
+			} else {
+				// add new clients
+				select {
+				case conn := <-clientConnected:
+					clients[nextID] = conn
+					stats[nextID] = &clientStat{}
+					nextID++
+				default: // non blocking
+				}
 			}
-
-			// drain channel
-			select {
-			case <-clientConnected:
-			default:
-			}
+			clientLock.Unlock()
 
 			if !started {
 				if err := stream.Start(); err != nil {
@@ -265,20 +342,17 @@ func getTrack(
 			if err := stream.Read(); err != nil {
 				panic(err)
 			}
-			log.Debug("Read frame from input")
 
 			// encode to opus
 			size, err := opusEnc.Encode(inBuf, encBuf)
 			if err != nil {
 				panic(err)
 			}
-			log.WithField("size", size).Debug("Encoded to opus")
 
-			if err := audioTrack.WriteSample(media.Sample{Data: encBuf[:size], Duration: frameDuration}); err != nil {
-				log.WithError(err).Warn("one peer failed")
-			}
+			frameChan <- encBuf[:size]
 		}
+
 	}()
 
-	return audioTrack
+	return clientConnected, nil
 }
