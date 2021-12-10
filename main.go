@@ -84,7 +84,14 @@ func handleClient(
 		log.Debug("created peer connection")
 
 		// Create a audio track
-		audioTrack, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus}, "audio", "pion")
+		audioTrack, err := webrtc.NewTrackLocalStaticSample(
+			webrtc.RTPCodecCapability{
+				MimeType:  webrtc.MimeTypeOpus,
+				ClockRate: sampleRate,
+				Channels:  channelCount,
+			},
+			"audio", "pion",
+		)
 		if err != nil {
 			log.WithError(err).Error("failed to create track")
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -166,6 +173,8 @@ func handleClient(
 		// in a production application you should exchange ICE Candidates via OnICECandidate
 		<-gatherComplete
 
+		log.WithField("codecs", fmt.Sprintf("%#v", rtpSender.GetParameters().Codecs)).Info("sender info")
+
 		if err := json.NewEncoder(w).Encode(&answer); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -176,8 +185,8 @@ func handleClient(
 
 const (
 	sampleRate    = 48000
-	frameDuration = time.Duration(float32(time.Millisecond) * float32(2.5))
-	channelCount  = 1
+	frameDuration = time.Duration(10 * time.Millisecond)
+	channelCount  = 2
 )
 
 var frameSize = uint64(frameDuration.Seconds() * sampleRate * channelCount)
@@ -315,7 +324,7 @@ func setupAudio(
 			}
 
 			// encode to opus
-			_, err := opusEnc.Encode(inBuf, encBuf)
+			encSize, err := opusEnc.Encode(inBuf, encBuf)
 			if err != nil {
 				for id, stats := range stats {
 					log.WithFields(logrus.Fields{
@@ -331,7 +340,7 @@ func setupAudio(
 
 			for id, conn := range clients {
 				select {
-				case conn.frames <- encBuf:
+				case conn.frames <- encBuf[:encSize]:
 					stats[id].sent++
 				default:
 					stats[id].dropped++
