@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -118,9 +119,12 @@ func handleClient(
 		rtcConn.OnConnectionStateChange(func(pcs webrtc.PeerConnectionState) {
 			switch pcs {
 			case webrtc.PeerConnectionStateConnected:
+				conn.state.Set(ConnectionStateConnected)
 				clientConnected <- conn
 			case webrtc.PeerConnectionStateDisconnected:
-				close(conn.shutdown)
+				conn.state.Set(ConnectionStateDisconnected)
+			case webrtc.PeerConnectionStateClosed, webrtc.PeerConnectionStateFailed:
+				conn.state.Set(ConnectionStateClosed)
 			}
 		})
 
@@ -191,15 +195,31 @@ const (
 
 var frameSize = uint64(frameDuration.Seconds() * sampleRate * channelCount)
 
+type ConnectionState uint64
+
+func (s *ConnectionState) Set(state ConnectionState) {
+	atomic.StoreUint64((*uint64)(s), uint64(state))
+}
+
+func (s *ConnectionState) Get() ConnectionState {
+	return ConnectionState(atomic.LoadUint64((*uint64)(s)))
+}
+
+const (
+	ConnectionStateDisconnected ConnectionState = iota
+	ConnectionStateConnected
+	ConnectionStateClosed
+)
+
 type conn struct {
-	shutdown chan struct{}
-	frames   chan []byte
+	state  *ConnectionState
+	frames chan []byte
 }
 
 func newConn(frames chan []byte) *conn {
 	return &conn{
-		shutdown: make(chan struct{}),
-		frames:   frames,
+		state:  new(ConnectionState),
+		frames: frames,
 	}
 }
 
@@ -339,6 +359,21 @@ func setupAudio(
 			printStats := time.Since(lastStatsOutput) > time.Second*5
 
 			for id, conn := range clients {
+				switch conn.state.Get() {
+				case ConnectionStateClosed:
+					log.WithFields(logrus.Fields{
+						"id":      id,
+						"sent":    stats[id].sent,
+						"dropped": stats[id].dropped,
+					}).Info("client connection closed")
+					close(conn.frames)
+					delete(stats, id)
+					delete(clients, id)
+					continue
+				case ConnectionStateDisconnected:
+					continue
+				}
+
 				select {
 				case conn.frames <- encBuf[:encSize]:
 					stats[id].sent++
