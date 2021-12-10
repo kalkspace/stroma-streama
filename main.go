@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -92,7 +91,22 @@ func handleClient(
 			return
 		}
 
-		conn := newConn(audioTrack)
+		frames := make(chan []byte, 10)
+
+		go func() {
+			for {
+				frame, ok := <-frames
+				if !ok {
+					return
+				}
+				err := audioTrack.WriteSample(media.Sample{Data: frame, Duration: frameDuration})
+				if err != nil {
+					log.WithError(err).Error("failed to write sample")
+				}
+			}
+		}()
+
+		conn := newConn(frames)
 
 		rtcConn.OnConnectionStateChange(func(pcs webrtc.PeerConnectionState) {
 			switch pcs {
@@ -169,14 +183,14 @@ const (
 var frameSize = uint64(frameDuration.Seconds() * sampleRate * channelCount)
 
 type conn struct {
-	track    *webrtc.TrackLocalStaticSample
 	shutdown chan struct{}
+	frames   chan []byte
 }
 
-func newConn(track *webrtc.TrackLocalStaticSample) *conn {
+func newConn(frames chan []byte) *conn {
 	return &conn{
-		track:    track,
 		shutdown: make(chan struct{}),
+		frames:   frames,
 	}
 }
 
@@ -245,62 +259,13 @@ func setupAudio(
 		nextID := uint64(0)
 		clients := make(map[uint64]*conn)
 		stats := make(map[uint64]*clientStat)
-		clientLock := new(sync.Mutex)
-		frameChan := make(chan []byte, 10)
-
-		go func() {
-			ticker := time.NewTicker(frameDuration)
-			defer ticker.Stop()
-			lastStatsOutput := time.Now()
-			for {
-				<-ticker.C
-				data := <-frameChan
-
-				printStats := false
-				if time.Since(lastStatsOutput) > time.Second*5 {
-					lastStatsOutput = time.Now()
-					printStats = true
-				}
-
-				clientLock.Lock()
-				clientsCopy := make(map[uint64]*conn)
-				for id, conn := range clients {
-					clientsCopy[id] = conn
-				}
-				clientLock.Unlock()
-
-				for id, conn := range clientsCopy {
-					select {
-					case <-conn.shutdown:
-						delete(clients, id)
-						delete(stats, id)
-						continue
-					default:
-					}
-					err := conn.track.WriteSample(media.Sample{Data: data, Duration: frameDuration})
-					if err != nil {
-						log.WithError(err).Error("failed to send sample")
-						stats[id].dropped++
-					} else {
-						stats[id].sent++
-					}
-					if printStats {
-						log.WithFields(logrus.Fields{
-							"id":      id,
-							"sent":    stats[id].sent,
-							"dropped": stats[id].dropped,
-						}).Info("client stats")
-					}
-				}
-			}
-		}()
+		lastStatsOutput := time.Now()
 
 		for {
 			if ctx.Err() != nil {
 				return
 			}
 
-			clientLock.Lock()
 			if len(clients) == 0 {
 				if started {
 					err := stream.Abort()
@@ -330,7 +295,6 @@ func setupAudio(
 				default: // non blocking
 				}
 			}
-			clientLock.Unlock()
 
 			if !started {
 				if err := stream.Start(); err != nil {
@@ -340,16 +304,52 @@ func setupAudio(
 			}
 
 			if err := stream.Read(); err != nil {
-				panic(err)
+				for id, stats := range stats {
+					log.WithFields(logrus.Fields{
+						"id":      id,
+						"sent":    stats.sent,
+						"dropped": stats.dropped,
+					}).Info("statistics")
+				}
+				log.WithError(err).Fatal("failed to read audio input")
 			}
 
 			// encode to opus
-			size, err := opusEnc.Encode(inBuf, encBuf)
+			_, err := opusEnc.Encode(inBuf, encBuf)
 			if err != nil {
-				panic(err)
+				for id, stats := range stats {
+					log.WithFields(logrus.Fields{
+						"id":      id,
+						"sent":    stats.sent,
+						"dropped": stats.dropped,
+					}).Info("statistics")
+				}
+				log.WithError(err).Fatal("failed to encode audio")
 			}
 
-			frameChan <- encBuf[:size]
+			printStats := time.Since(lastStatsOutput) > time.Second*5
+
+			for id, conn := range clients {
+				select {
+				case conn.frames <- encBuf:
+					stats[id].sent++
+				default:
+					stats[id].dropped++
+				}
+
+				if printStats {
+					log.WithFields(logrus.Fields{
+						"id":      id,
+						"sent":    stats[id].sent,
+						"dropped": stats[id].dropped,
+					}).Info("statistics")
+				}
+			}
+
+			if printStats {
+				lastStatsOutput = time.Now()
+			}
+
 		}
 
 	}()
