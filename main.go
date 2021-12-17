@@ -28,6 +28,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGABRT)
 	defer cancel()
 
+	log.Info("setting up audio...")
 	addClient, err := setupAudio(ctx, log)
 	if err != nil {
 		log.WithError(err).Fatal("failed to setup audio recording")
@@ -84,69 +85,11 @@ func handleClient(
 		}
 		log.Debug("created peer connection")
 
-		// Create a audio track
-		audioTrack, err := webrtc.NewTrackLocalStaticSample(
-			webrtc.RTPCodecCapability{
-				MimeType:  webrtc.MimeTypeOpus,
-				ClockRate: sampleRate,
-				Channels:  channelCount,
-			},
-			"audio", "pion",
-		)
-		if err != nil {
-			log.WithError(err).Error("failed to create track")
+		if err := initConn(log, rtcConn, clientConnected); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-
-		frames := make(chan []byte, 10)
-
-		go func() {
-			for {
-				frame, ok := <-frames
-				if !ok {
-					return
-				}
-				err := audioTrack.WriteSample(media.Sample{Data: frame, Duration: frameDuration})
-				if err != nil {
-					log.WithError(err).Error("failed to write sample")
-				}
-			}
-		}()
-
-		conn := newConn(frames)
-
-		rtcConn.OnConnectionStateChange(func(pcs webrtc.PeerConnectionState) {
-			switch pcs {
-			case webrtc.PeerConnectionStateConnected:
-				conn.state.Set(ConnectionStateConnected)
-				clientConnected <- conn
-			case webrtc.PeerConnectionStateDisconnected:
-				conn.state.Set(ConnectionStateDisconnected)
-			case webrtc.PeerConnectionStateClosed, webrtc.PeerConnectionStateFailed:
-				conn.state.Set(ConnectionStateClosed)
-			}
-		})
-
-		rtpSender, err := rtcConn.AddTrack(audioTrack)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		log.Debug("added track")
-
-		// Read incoming RTCP packets
-		// Before these packets are returned they are processed by interceptors. For things
-		// like NACK this needs to be called.
-		go func() {
-			rtcpBuf := make([]byte, 1500)
-			for {
-				if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
-					log.Debug("rtcp done")
-					return
-				}
-			}
-		}()
+		log.Debug("created internal connection tracking")
 
 		err = rtcConn.SetRemoteDescription(offer)
 		if err != nil {
@@ -176,8 +119,6 @@ func handleClient(
 		// we do this because we only can exchange one signaling message
 		// in a production application you should exchange ICE Candidates via OnICECandidate
 		<-gatherComplete
-
-		log.WithField("codecs", fmt.Sprintf("%#v", rtpSender.GetParameters().Codecs)).Info("sender info")
 
 		if err := json.NewEncoder(w).Encode(&answer); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -216,11 +157,67 @@ type conn struct {
 	frames chan []byte
 }
 
-func newConn(frames chan []byte) *conn {
-	return &conn{
-		state:  new(ConnectionState),
-		frames: frames,
+func initConn(log logrus.FieldLogger, rtcConn *webrtc.PeerConnection, clientConnected chan<- *conn) error {
+	// Create a audio track
+	audioTrack, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{
+			MimeType:  webrtc.MimeTypeOpus,
+			ClockRate: sampleRate,
+			Channels:  channelCount,
+		},
+		"audio", "pion",
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create track: %w", err)
 	}
+
+	frames := make(chan []byte, 10)
+	go func() {
+		for {
+			frame, ok := <-frames
+			if !ok {
+				return
+			}
+			err := audioTrack.WriteSample(media.Sample{Data: frame, Duration: frameDuration})
+			if err != nil {
+				log.WithError(err).Error("failed to write sample")
+			}
+		}
+	}()
+
+	state := new(ConnectionState)
+	conn := &conn{state: state, frames: frames}
+	rtcConn.OnConnectionStateChange(func(pcs webrtc.PeerConnectionState) {
+		switch pcs {
+		case webrtc.PeerConnectionStateConnected:
+			state.Set(ConnectionStateConnected)
+			clientConnected <- conn
+		case webrtc.PeerConnectionStateDisconnected:
+			state.Set(ConnectionStateDisconnected)
+		case webrtc.PeerConnectionStateClosed, webrtc.PeerConnectionStateFailed:
+			state.Set(ConnectionStateClosed)
+		}
+	})
+
+	rtpSender, err := rtcConn.AddTrack(audioTrack)
+	if err != nil {
+		return fmt.Errorf("failed to add track: %w", err)
+	}
+
+	// Read incoming RTCP packets
+	// Before these packets are returned they are processed by interceptors. For things
+	// like NACK this needs to be called.
+	go func() {
+		rtcpBuf := make([]byte, 1500)
+		for {
+			if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
+				log.Debug("rtcp done")
+				return
+			}
+		}
+	}()
+
+	return nil
 }
 
 type clientStat struct {
