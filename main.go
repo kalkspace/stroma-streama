@@ -85,6 +85,15 @@ func handleClient(
 		}
 		log.Debug("created peer connection")
 
+		iceCandidates := make(chan *webrtc.ICECandidate)
+		rtcConn.OnICECandidate(func(i *webrtc.ICECandidate) {
+			if i == nil {
+				close(iceCandidates)
+			} else {
+				iceCandidates <- i
+			}
+		})
+
 		if err := initConn(log, rtcConn, clientConnected); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -103,9 +112,7 @@ func handleClient(
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		log.Debug("asnwer created")
-
-		gatherComplete := webrtc.GatheringCompletePromise(rtcConn)
+		log.Debug("answer created")
 
 		// Sets the LocalDescription, and starts our UDP listeners
 		err = rtcConn.SetLocalDescription(answer)
@@ -115,16 +122,42 @@ func handleClient(
 		}
 		log.Debug("set local description")
 
-		// Block until ICE Gathering is complete, disabling trickle ICE
-		// we do this because we only can exchange one signaling message
-		// in a production application you should exchange ICE Candidates via OnICECandidate
-		<-gatherComplete
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "response writer is not flushable", http.StatusInternalServerError)
+			return
+		}
 
-		if err := json.NewEncoder(w).Encode(&answer); err != nil {
+		enc := json.NewEncoder(w)
+		if err := enc.Encode(&answer); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		flusher.Flush()
 		log.Debug("answer encoded and sent to client")
+
+		candidateCount := 0
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+
+			case candidate, open := <-iceCandidates:
+				if !open {
+					log.WithField("candidates", candidateCount).Debug("all candidates sent")
+					return
+				}
+
+				candidateInit := candidate.ToJSON()
+				err := enc.Encode(&candidateInit)
+				if err != nil {
+					w.Write([]byte(`{ "error": "failed to encode candidate" }`))
+					return
+				}
+				flusher.Flush()
+				candidateCount++
+			}
+		}
 	}
 }
 

@@ -9,7 +9,29 @@
 
     <div id="logs"></div>
 
+    <script src="https://unpkg.com/@streamparser/json@0.0.5/dist/umd/index.js"></script>
     <script>
+      async function parseJsonObjectStream(stream, handler) {
+        const parser = new jsonparse.JsonParser({ paths: ["$"] });
+        parser.onValue = handler;
+
+        const reader = stream.getReader();
+        const parse = async () => {
+          const { done, value } = await reader.read();
+          if (done) {
+            return;
+          }
+          try {
+            parser.write(value);
+          } catch (e) {
+            console.error("failed to parse json", e);
+            return;
+          }
+          await parse();
+        };
+        await parse();
+      }
+
       let pc = new RTCPeerConnection({
         iceServers: [
           {
@@ -70,13 +92,26 @@
           return;
         }
 
-        const remoteSession = await response.json();
-
-        try {
-          pc.setRemoteDescription(new RTCSessionDescription(remoteSession));
-        } catch (e) {
-          alert(e);
-        }
+        await parseJsonObjectStream(response.body, (value) => {
+          console.debug("got json:", value);
+          const { error } = value;
+          if (error) {
+            console.error("got error from backend:", value.error);
+            return;
+          }
+          if ("sdp" in value) {
+            // treat as remote description
+            pc.setRemoteDescription(new RTCSessionDescription(value));
+            console.log("set remote description");
+            return;
+          }
+          if ("candidate" in value) {
+            pc.addIceCandidate(value);
+            return;
+          }
+          console.warn("received unexpected message", value);
+        });
+        console.debug("parsed all json from body");
       };
 
       document
