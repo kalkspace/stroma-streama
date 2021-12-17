@@ -20,18 +20,23 @@
 
       const logContainer = document.getElementById("logs");
       let log = (msg) => {
+        console.log(msg);
         logContainer.innerHTML += msg + "<br>";
       };
 
       const player = document.getElementById("player");
       pc.ontrack = function (event) {
-        player.srcObject = event.streams[0];
+        const track = event.streams[0];
+        console.debug("received track", { event, track });
+        player.srcObject = track;
       };
 
       pc.oniceconnectionstatechange = (e) => log(pc.iceConnectionState);
       let sessionDescription = null;
       pc.onicecandidate = (event) => {
+        console.debug("got ice candidate", { candidate: event.candidate });
         if (event.candidate === null) {
+          console.debug("ice candidate succeeded");
           sessionDescription = pc.localDescription;
         }
       };
@@ -42,7 +47,10 @@
       });
 
       pc.createOffer()
-        .then((d) => pc.setLocalDescription(d))
+        .then((d) => {
+          console.debug("setting local description", d);
+          pc.setLocalDescription(d);
+        })
         .catch(log);
 
       const startSession = async () => {
