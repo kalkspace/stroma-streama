@@ -6,13 +6,14 @@ import playButtonImage from "./images/stroma-play.svg";
 const BACKEND_URL = "https://marcus.stromaproxy.kalk.space/sdp";
 
 async function parseJsonObjectStream(stream, handler) {
-  const parser = new JSONParser({ paths: ["$"] });
+  const parser = new JSONParser({ paths: ["$"], separator: "" });
   parser.onValue = handler;
 
   const reader = stream.getReader();
   const parse = async () => {
     const { done, value } = await reader.read();
     if (done) {
+      parser.end();
       return;
     }
     try {
