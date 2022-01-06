@@ -38,6 +38,7 @@ async function initWebRTC(player) {
     const track = event.streams[0];
     console.debug("received track", { event, track });
     player.srcObject = track;
+    player.play();
   });
   peerConn.addEventListener("iceconnectionstatechange", () =>
     console.debug("connection state change:", peerConn.iceConnectionState)
