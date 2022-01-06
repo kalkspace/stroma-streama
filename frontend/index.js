@@ -2,6 +2,10 @@ import { JSONParser } from "@streamparser/json";
 
 /** @ts-ignore */
 import playButtonImage from "./images/stroma-play.svg";
+/** @ts-ignore */
+import pauseButtonImage from "./images/stroma-pause.svg";
+/** @ts-ignore */
+import loadingButtonImage from "./images/stroma-loading.svg";
 
 const BACKEND_URL = "https://marcus.stromaproxy.kalk.space/sdp";
 
@@ -62,12 +66,29 @@ async function initWebRTC(player) {
   return peerConn;
 }
 
+/** @typedef {"idle" | "loading" | "playing"} PlayerState */
+/** @type {PlayerState} */
+let playerState = "idle";
+/** @type {Record<PlayerState, string>} */
+const stateToImage = {
+  idle: playButtonImage,
+  loading: loadingButtonImage,
+  playing: pauseButtonImage,
+};
 /**
- * @param {Promise<RTCPeerConnection>} peerConnPromise
+ * @param {HTMLButtonElement} button
+ * @param {PlayerState} newState
  */
-async function startSession(peerConnPromise) {
-  const peerConn = await peerConnPromise;
+function setState(button, newState) {
+  let buttonImage = stateToImage[newState];
+  button.style.backgroundImage = `url('${buttonImage}')`;
+  playerState = newState;
+}
 
+/**
+ * @param {RTCPeerConnection} peerConn
+ */
+async function startSession(peerConn) {
   const response = await fetch(BACKEND_URL, {
     method: "POST",
     headers: {
@@ -104,7 +125,41 @@ async function startSession(peerConnPromise) {
 }
 
 /**
- * @param {HTMLElement} beforeTag
+ * @param {HTMLAudioElement} player
+ * @param {HTMLButtonElement} button
+ * @param {Promise<RTCPeerConnection>} webrtcConnPromise
+ */
+async function handleButton(player, button, webrtcConnPromise) {
+  const peerConn = await webrtcConnPromise;
+
+  if (playerState === "idle") {
+    if (peerConn.connectionState === "connected") {
+      let track = peerConn.getReceivers()[0]?.track;
+      if (track) {
+        track.enabled = true;
+        setState(button, "playing");
+        return;
+      }
+    }
+
+    setState(button, "loading");
+    await startSession(peerConn);
+    return;
+  }
+  if (playerState === "loading") {
+    return;
+  }
+  if (playerState === "playing") {
+    let track = peerConn.getReceivers()[0]?.track;
+    if (track) {
+      track.enabled = false;
+    }
+    setState(button, "idle");
+  }
+}
+
+/**
+ * @param {Element} beforeTag
  */
 function initEmbed(beforeTag) {
   const container = document.createElement("div");
@@ -123,8 +178,12 @@ function initEmbed(beforeTag) {
   playButton.style.width = "200px";
   playButton.style.height = "200px";
   playButton.style.cursor = "pointer";
-  playButton.addEventListener("click", () => startSession(webrtcConnPromise));
+  playButton.addEventListener("click", () =>
+    handleButton(player, playButton, webrtcConnPromise)
+  );
   container.appendChild(playButton);
+
+  player.addEventListener("play", () => setState(playButton, "playing"));
 
   beforeTag.parentNode.insertBefore(container, beforeTag);
 }
