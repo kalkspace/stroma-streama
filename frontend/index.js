@@ -1,10 +1,12 @@
-import { JsonParser } from "@streamparser/json";
+import { JSONParser } from "@streamparser/json";
+
+/** @ts-ignore */
 import playButtonImage from "./images/stroma-play.svg";
 
 const BACKEND_URL = "https://marcus.stromaproxy.kalk.space/sdp";
 
 async function parseJsonObjectStream(stream, handler) {
-  const parser = new JsonParser({ paths: ["$"] });
+  const parser = new JSONParser({ paths: ["$"] });
   parser.onValue = handler;
 
   const reader = stream.getReader();
@@ -43,7 +45,7 @@ async function initWebRTC(player) {
   const iceCandidatesDone = new Promise((resolve) => {
     peerConn.addEventListener("icecandidate", ({ candidate }) => {
       console.debug("got ice candidate", { candidate });
-      if (event.candidate === null) {
+      if (candidate === null) {
         console.debug("ice candidates discovered");
         resolve();
       }
@@ -73,7 +75,7 @@ async function startSession(peerConnPromise) {
   });
 
   if (!response.ok) {
-    console.error("http request failed:", response.statusCode);
+    console.error("http request failed:", response.status);
     return;
   }
 
