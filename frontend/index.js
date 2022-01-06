@@ -1,4 +1,5 @@
 import { JsonParser } from "@streamparser/json";
+import playButtonImage from "./images/stroma-play.svg";
 
 const BACKEND_URL = "https://marcus.stromaproxy.kalk.space/sdp";
 
@@ -109,7 +110,15 @@ function initEmbed(beforeTag) {
   container.appendChild(player);
 
   const playButton = document.createElement("button");
-  playButton.textContent = "Play Stream!";
+  playButton.style.backgroundColor = "transparent";
+  playButton.style.backgroundImage = `url(${playButtonImage})`;
+  playButton.style.backgroundSize = "contain";
+  playButton.style.backgroundRepeat = "no-repeat";
+  playButton.style.backgroundPosition = "center";
+  playButton.style.border = "none";
+  playButton.style.width = "200px";
+  playButton.style.height = "200px";
+  playButton.style.cursor = "pointer";
   playButton.addEventListener("click", () => startSession(webrtcConnPromise));
   container.appendChild(playButton);
 

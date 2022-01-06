@@ -10,6 +10,11 @@ module.exports = {
         exclude: /node_modules/,
         use: ["babel-loader"],
       },
+      {
+        test: /\.svg$/,
+        type: "asset/resource",
+        use: [{ loader: "svgo-loader" }],
+      },
     ],
   },
   resolve: {
