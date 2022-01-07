@@ -1,6 +1,11 @@
 - name: Configure the streamer
   hosts: all
+  become: yes
   tasks:
+    - name: Create directory for SSH key
+      file:
+        path: /etc/autossh
+        state: directory
     - name: Generate SSH key
       community.crypto.openssh_keypair:
         path: /etc/autossh/id_rsa
