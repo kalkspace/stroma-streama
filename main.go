@@ -164,7 +164,7 @@ func handleClient(
 const (
 	sampleRate    = 48000
 	frameDuration = time.Duration(10 * time.Millisecond)
-	channelCount  = 2
+	channelCount  = 1
 )
 
 var frameSize = uint64(frameDuration.Seconds() * sampleRate * channelCount)
