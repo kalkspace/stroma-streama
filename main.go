@@ -162,7 +162,7 @@ func handleClient(
 }
 
 const (
-	sampleRate    = 48000
+	sampleRate    = 44100
 	frameDuration = time.Duration(10 * time.Millisecond)
 	channelCount  = 2
 )
