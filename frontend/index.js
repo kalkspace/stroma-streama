@@ -146,13 +146,17 @@ async function handleButton(player, button) {
 
 /**
  * @param {Element} beforeTag
+ * @param {string} srcURL
  */
 function initEmbed(beforeTag, srcURL) {
   const container = document.createElement("div");
 
   const player = document.createElement("audio");
-  const audioSrc = new URL("/stroma-pink-noise.mp3", srcURL);
-  player.src = audioSrc.toString();
+  let audioSrc = "/stroma-pink-noise.mp3";
+  if (srcURL.match(/^https?:\/\//)) {
+    audioSrc = new URL(audioSrc, srcURL).toString();
+  }
+  player.src = audioSrc;
   player.loop = true;
   container.appendChild(player);
 
