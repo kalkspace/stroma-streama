@@ -127,45 +127,33 @@ async function startSession(peerConn) {
 /**
  * @param {HTMLAudioElement} player
  * @param {HTMLButtonElement} button
- * @param {Promise<RTCPeerConnection>} webrtcConnPromise
  */
-async function handleButton(player, button, webrtcConnPromise) {
-  const peerConn = await webrtcConnPromise;
-
+async function handleButton(player, button) {
   if (playerState === "idle") {
-    if (peerConn.connectionState === "connected") {
-      let track = peerConn.getReceivers()[0]?.track;
-      if (track) {
-        track.enabled = true;
-        setState(button, "playing");
-        return;
-      }
-    }
-
     setState(button, "loading");
-    await startSession(peerConn);
+    await player.play();
+    setState(button, "playing");
     return;
   }
   if (playerState === "loading") {
     return;
   }
   if (playerState === "playing") {
-    let track = peerConn.getReceivers()[0]?.track;
-    if (track) {
-      track.enabled = false;
-    }
     setState(button, "idle");
+    player.pause();
   }
 }
 
 /**
  * @param {Element} beforeTag
  */
-function initEmbed(beforeTag) {
+function initEmbed(beforeTag, srcURL) {
   const container = document.createElement("div");
 
   const player = document.createElement("audio");
-  const webrtcConnPromise = initWebRTC(player);
+  const audioSrc = new URL("/stroma-pink-noise.mp3", srcURL);
+  player.src = audioSrc.toString();
+  player.loop = true;
   container.appendChild(player);
 
   const playButton = document.createElement("button");
@@ -178,13 +166,9 @@ function initEmbed(beforeTag) {
   playButton.style.width = "200px";
   playButton.style.height = "200px";
   playButton.style.cursor = "pointer";
-  playButton.addEventListener("click", () =>
-    handleButton(player, playButton, webrtcConnPromise)
-  );
+  playButton.addEventListener("click", () => handleButton(player, playButton));
   container.appendChild(playButton);
-
-  player.addEventListener("play", () => setState(playButton, "playing"));
 
   beforeTag.parentNode.insertBefore(container, beforeTag);
 }
-initEmbed(document.currentScript);
+initEmbed(document.currentScript, document.currentScript.getAttribute("src"));
