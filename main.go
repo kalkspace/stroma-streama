@@ -28,6 +28,10 @@ var (
 		Name: "streama_current_clients",
 		Help: "The current number of viewers",
 	})
+	totalClients = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "streama_total_clients",
+		Help: "The total number of viewers",
+	})
 )
 
 func main() {
@@ -237,6 +241,7 @@ func initConn(log logrus.FieldLogger, rtcConn *webrtc.PeerConnection, clientConn
 			state.Set(ConnectionStateConnected)
 			clientConnected <- conn
 			currentClients.Inc()
+			totalClients.Inc()
 		case webrtc.PeerConnectionStateDisconnected:
 			state.Set(ConnectionStateDisconnected)
 			currentClients.Dec()
