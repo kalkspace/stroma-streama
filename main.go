@@ -16,8 +16,22 @@ import (
 	"github.com/pion/webrtc/v3"
 	"github.com/pion/webrtc/v3/pkg/media"
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/hraban/opus.v2"
+)
+
+var (
+	currentClients = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "streama_current_clients",
+		Help: "The current number of viewers",
+	})
+	totalClients = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "streama_total_clients",
+		Help: "The total number of viewers",
+	})
 )
 
 func main() {
@@ -36,6 +50,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/sdp", handleClient(log, addClient))
+	mux.Handle("/metrics", promhttp.Handler())
 	server := http.Server{
 		Addr:    ":8080",
 		Handler: cors.AllowAll().Handler(mux),
@@ -225,10 +240,14 @@ func initConn(log logrus.FieldLogger, rtcConn *webrtc.PeerConnection, clientConn
 		case webrtc.PeerConnectionStateConnected:
 			state.Set(ConnectionStateConnected)
 			clientConnected <- conn
+			currentClients.Inc()
+			totalClients.Inc()
 		case webrtc.PeerConnectionStateDisconnected:
 			state.Set(ConnectionStateDisconnected)
+			currentClients.Dec()
 		case webrtc.PeerConnectionStateClosed, webrtc.PeerConnectionStateFailed:
 			state.Set(ConnectionStateClosed)
+			currentClients.Dec()
 		}
 	})
 
