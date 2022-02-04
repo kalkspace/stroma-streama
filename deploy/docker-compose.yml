@@ -2,10 +2,13 @@ version: '3.5'
 
 services:
   streama:
-    image: quay.io/kalkspace/stroma-streama:sha-037df3e
+    image: quay.io/kalkspace/stroma-streama:main
     volumes:
-      - "/dev:/dev"
-    privileged: true
+      - /tmp/pulseaudio.socket:/tmp/pulseaudio.socket
+    environment:
+      PULSE_SERVER: unix:/tmp/pulseaudio.socket
+      PULSE_COOKIE: /tmp/pulseaudio.cookie
+    user: "1000:1000"
     restart: always
 
   ssh:
