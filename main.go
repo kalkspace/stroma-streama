@@ -297,24 +297,39 @@ func setupAudio(
 		return nil, errors.Wrap(err, "failed to get devices")
 	}
 	var selectedDev *portaudio.DeviceInfo
-	if len(os.Args) > 1 {
-		for _, dev := range devices {
-			log.WithField("name", dev.Name).Debug("dev found")
+	for _, dev := range devices {
+		log := log.WithFields(logrus.Fields{
+			"device_name":         dev.Name,
+			"hostapi_name":        dev.HostApi.Name,
+			"input_channels":      dev.MaxInputChannels,
+			"default_sample_rate": dev.DefaultSampleRate,
+		})
+		log.Debug("possible device found")
+		if len(os.Args) > 1 {
 			if dev.Name == os.Args[1] {
 				if dev.MaxInputChannels < channelCount {
-					log.WithField("channels", dev.MaxInputChannels).Fatal("Device not suitable for recording")
+					log.Fatal("Device not suitable for recording")
 				}
+				log.Info("desired device found")
 				selectedDev = dev
 			}
 		}
-		if selectedDev == nil {
-			log.WithField("name", os.Args[1]).Fatal("dev not found")
+	}
+	if selectedDev == nil {
+		if len(os.Args) > 1 {
+			log.WithField("name", os.Args[1]).Fatal("desired device not found")
 		}
-	} else {
+
 		dev, err := portaudio.DefaultInputDevice()
 		if err != nil {
-			log.WithError(err).Fatal("Failed to find default input device")
+			log.WithError(err).Fatal("failed to use default input device")
 		}
+		log.WithFields(logrus.Fields{
+			"device_name":         dev.Name,
+			"hostapi_name":        dev.HostApi.Name,
+			"input_channels":      dev.MaxInputChannels,
+			"default_sample_rate": dev.DefaultSampleRate,
+		}).Info("selected default audio device")
 		selectedDev = dev
 	}
 
