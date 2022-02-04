@@ -9,8 +9,9 @@ RUN go build main.go
 
 FROM alpine
 
-RUN apk add opus opusfile portaudio pulseaudio pulseaudio-alsa alsa-utils
+RUN apk add opus opusfile portaudio pulseaudio pulseaudio-alsa alsa-plugins-pulse alsa-utils
 
 COPY --from=build /src/main /usr/local/bin/stroma-streama
+COPY contrib/pulse-client.conf /etc/pulse/client.conf
 
 ENTRYPOINT ["/usr/local/bin/stroma-streama"]
