@@ -33,7 +33,18 @@ async function parseJsonObjectStream(stream, handler) {
 
 async function initWebRTC(player) {
   const peerConn = new RTCPeerConnection({
-    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    iceServers: [
+      { urls: "stun:bbb.kalk.space:5349" },
+      {
+        urls: [
+          "turns:bbb.kalk.space:5349",
+          "turn:bbb.kalk.space:5349?transport=tcp",
+          "turn:bbb.kalk.space:5349",
+        ],
+        username: "webrtc",
+        credential: "pengGUT1",
+      },
+    ],
   });
   // Offer to receive 1 audio
   peerConn.addTransceiver("audio", { direction: "sendrecv" });
