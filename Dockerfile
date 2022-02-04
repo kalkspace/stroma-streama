@@ -9,7 +9,7 @@ RUN go build main.go
 
 FROM alpine
 
-RUN apk add opus opusfile portaudio
+RUN apk add opus opusfile portaudio pulseaudio pulseaudio-alsa alsa-utils
 
 COPY --from=build /src/main /usr/local/bin/stroma-streama
 
