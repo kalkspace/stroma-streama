@@ -2,3 +2,8 @@
 base = "frontend"
 command = "yarn build"
 publish = "dist"
+
+[dev]
+command = "yarn --cwd frontend develop"
+targetPort = 8080
+framework = "#custom"
