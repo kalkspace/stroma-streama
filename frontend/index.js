@@ -31,7 +31,10 @@ async function parseJsonObjectStream(stream, handler) {
   await parse();
 }
 
-async function initWebRTC(player) {
+/**
+ * @returns {Promise<RTCPeerConnection>}
+ */
+async function initWebRTC() {
   const peerConn = new RTCPeerConnection({
     iceServers: [
       { urls: "stun:bbb.kalk.space:5349" },
@@ -49,12 +52,6 @@ async function initWebRTC(player) {
   // Offer to receive 1 audio
   peerConn.addTransceiver("audio", { direction: "sendrecv" });
 
-  peerConn.addEventListener("track", (event) => {
-    const track = event.streams[0];
-    console.debug("received track", { event, track });
-    player.srcObject = track;
-    player.play();
-  });
   peerConn.addEventListener("iceconnectionstatechange", () =>
     console.debug("connection state change:", peerConn.iceConnectionState)
   );
@@ -98,8 +95,21 @@ function setState(button, newState) {
 
 /**
  * @param {RTCPeerConnection} peerConn
+ * @returns {Promise<MediaStream>}
  */
 async function startSession(peerConn) {
+  /** @type {(track: MediaStream) => void} */
+  let notifyReadyToPlay;
+  /** @type {Promise<MediaStream>} */
+  const readyToPlay = new Promise((resolve) => {
+    notifyReadyToPlay = resolve;
+  });
+  peerConn.addEventListener("track", (event) => {
+    const track = event.streams[0];
+    console.debug("received track", { event, track });
+    notifyReadyToPlay(track);
+  });
+
   const response = await fetch(BACKEND_URL, {
     method: "POST",
     headers: {
@@ -113,7 +123,8 @@ async function startSession(peerConn) {
     return;
   }
 
-  await parseJsonObjectStream(response.body, (value) => {
+  // not awaiting, can happen in the background
+  parseJsonObjectStream(response.body, (value) => {
     console.debug("got json:", value);
     const { error } = value;
     if (error) {
@@ -131,8 +142,9 @@ async function startSession(peerConn) {
       return;
     }
     console.warn("received unexpected message", value);
-  });
-  console.debug("parsed all json from body");
+  }).then(() => console.debug("parsed all json from body"));
+
+  return readyToPlay;
 }
 
 /**
@@ -154,7 +166,11 @@ async function handleButton(player, button, webrtcConnPromise) {
     }
 
     setState(button, "loading");
-    await startSession(peerConn);
+    const stream = await startSession(peerConn);
+    console.debug("got stream, starting to play");
+    player.srcObject = stream;
+    await player.play();
+    setState(button, "playing");
     return;
   }
   if (playerState === "loading") {
@@ -173,10 +189,11 @@ async function handleButton(player, button, webrtcConnPromise) {
  * @param {Element} beforeTag
  */
 function initEmbed(beforeTag) {
+  const webrtcConnPromise = initWebRTC();
+
   const container = document.createElement("div");
 
   const player = document.createElement("audio");
-  const webrtcConnPromise = initWebRTC(player);
   container.appendChild(player);
 
   const playButton = document.createElement("button");
