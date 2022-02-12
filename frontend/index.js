@@ -166,7 +166,10 @@ async function handleButton(player, button, webrtcConnPromise) {
     }
 
     setState(button, "loading");
-    const stream = await startSession(peerConn);
+    const [_, stream] = await Promise.all([
+      player.play(), // plays silence
+      startSession(peerConn),
+    ]);
     console.debug("got stream, starting to play");
     player.srcObject = stream;
     await player.play();
@@ -186,14 +189,17 @@ async function handleButton(player, button, webrtcConnPromise) {
 }
 
 /**
- * @param {Element} beforeTag
+ * @param {HTMLOrSVGScriptElement} scriptTag
  */
-function initEmbed(beforeTag) {
+function initEmbed(scriptTag) {
   const webrtcConnPromise = initWebRTC();
 
   const container = document.createElement("div");
 
   const player = document.createElement("audio");
+  /** @ts-ignore */
+  const silentUrl = new URL("1-second-of-silence.mp3", scriptTag.src);
+  player.src = silentUrl.toString();
   container.appendChild(player);
 
   const playButton = document.createElement("button");
@@ -213,6 +219,6 @@ function initEmbed(beforeTag) {
 
   player.addEventListener("play", () => setState(playButton, "playing"));
 
-  beforeTag.parentNode.insertBefore(container, beforeTag);
+  scriptTag.parentNode.insertBefore(container, scriptTag);
 }
 initEmbed(document.currentScript);
