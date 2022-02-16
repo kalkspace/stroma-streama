@@ -37,12 +37,12 @@ async function parseJsonObjectStream(stream, handler) {
 async function initWebRTC() {
   const peerConn = new RTCPeerConnection({
     iceServers: [
-      { urls: "stun:bbb.kalk.space:5349" },
+      { urls: "stun:turn.kalk.space:5349" },
       {
         urls: [
-          "turns:bbb.kalk.space:5349",
-          "turn:bbb.kalk.space:5349?transport=tcp",
-          "turn:bbb.kalk.space:5349",
+          "turns:turn.kalk.space:5349?transport=tcp",
+          "turn:turn.kalk.space:5349?transport=tcp",
+          "turn:turn.kalk.space:5349",
         ],
         username: "webrtc",
         credential: "pengGUT1",
